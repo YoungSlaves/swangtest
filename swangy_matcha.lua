@@ -2034,7 +2034,8 @@ local function scStep()
         if started then
             scStats.checks = scStats.checks + 1
             scResetCheck()
-            scBusyUntil = math.max(scBusyUntil, now + 2.5)
+            -- capped: a check start may pause scanning briefly, not for 2.5s
+            scBusyUntil = now + 0.9
             scTrack.speed, scTrack.sampleAt, scTrack.scheduled = nil, nil, false
             scEvent(string.format("start base=%.1f lr=%.1f prev=%s tg=%s tp=%s",
                 scTrack.base, lr, tostring(prev), tostring(tg), tostring(tp)))
@@ -2126,7 +2127,8 @@ local function scStep()
 
             if gr ~= 0 then scStats.checks = scStats.checks + 1 end
             scResetCheck()
-            scBusyUntil = math.max(scBusyUntil, now + 2.5)
+            -- capped: a check start may pause scanning briefly, not for 2.5s
+            scBusyUntil = now + 0.9
             scTrack.speed, scTrack.sampleAt = nil, nil
         end
         scTrack.lr, scTrack.goal = lr, gr
@@ -2298,10 +2300,29 @@ local function refreshPallets()
     palScanMs = palScanMs * 0.8 + (os.clock() - started) * 1000 * 0.2
 end
 
-connection = RunService.RenderStepped:Connect(function()
-    -- a reload replaces __SWANGY_LOAD: a stale instance must stop drawing too
-    if not running or _G.__SWANGY_LOAD ~= loadToken then return end
+-- one frame that cannot be projected must not leave the last one on screen:
+-- that is the frozen-ESP state where the box sits still while the object walks
+-- away, and it stays that way until something forces a redraw
+RT.ghost = function()
+    for i = 1, (genShown or 0) do hideSlot(genPool[i]) end
+    for i = 1, (winShown or 0) do hideSlot(winPool[i]) end
+    for i = 1, (palShown or 0) do hideSlot(palPool[i]) end
+    if trapPool then for i = 1, (trapShown or 0) do hideSlot(trapPool[i]) end end
+    genShown, winShown, palShown = 0, 0, 0
+end
+
+-- the callback is kept on RT so the watchdog below can re-attach it
+RT.frame = function()
+    -- a reload replaces __SWANGY_LOAD: a stale instance must stop drawing too,
+    -- but the token is re-asserted rather than trusted. An executor that rebuilds
+    -- _G on a map load left this hook returning on every single frame, which froze
+    -- every box at its last position and only cleared when the script was reloaded.
+    if not running then return end
+    local tok = _G.__SWANGY_LOAD
+    if tok ~= nil and tok ~= loadToken then return end
+    _G.__SWANGY_LOAD = loadToken
     local now = os.clock()
+    RT.beat = now
     if CFG.drawHz > 0 and now - (CFG.lastFrame or 0) < 1 / CFG.drawHz then return end
     CFG.lastFrame = now
     frameN = frameN + 1
@@ -2313,9 +2334,9 @@ connection = RunService.RenderStepped:Connect(function()
     -- CurrentCamera is replaced on respawn and on a map swap; keeping the first
     -- one left every box projecting through a dead camera until reload
     camera = Workspace.CurrentCamera or camera
-    if not camera then return end
+    if not camera then pcall(RT.ghost) return end
     local okc, ccf = pcall(CAM.cframe, camera)
-    if not okc or not ccf then return end
+    if not okc or not ccf then pcall(RT.ghost) return end
     local camPos = ccf.Position
     camNow = camPos
     CAM.x, CAM.y, CAM.z = camPos.X, camPos.Y, camPos.Z
@@ -2346,34 +2367,55 @@ connection = RunService.RenderStepped:Connect(function()
 
     if CFG.gen then
         local okg, errg = pcall(drawGens, camPos, now)
-        CFG.errGen = (not okg) and tostring(errg) or nil
+        if okg then CFG.errGen = nil else CFG.errGen = tostring(errg) pcall(RT.ghost) end
     elseif genShown > 0 then
         for i = 1, genShown do hideSlot(genPool[i]) end
         genShown = 0
     end
     if CFG.win then
         local okw, errw = pcall(drawWindows, camPos)
-        CFG.errWin = (not okw) and tostring(errw) or nil
+        if okw then CFG.errWin = nil else CFG.errWin = tostring(errw) pcall(RT.ghost) end
     elseif winShown > 0 then
         for i = 1, winShown do hideSlot(winPool[i]) end
         winShown = 0
     end
     if CFG.pal then
         local okp, errp = pcall(drawPallets, camPos)
-        CFG.errPal = (not okp) and tostring(errp) or nil
+        if okp then CFG.errPal = nil else CFG.errPal = tostring(errp) pcall(RT.ghost) end
     elseif palShown > 0 then
         for i = 1, palShown do hideSlot(palPool[i]) end
         palShown = 0
     end
     if CFG.trap then
         local okt, errt = pcall(drawTraps, camPos)
-        CFG.errTrap = (not okt) and tostring(errt) or nil
+        if okt then CFG.errTrap = nil else CFG.errTrap = tostring(errt) pcall(RT.ghost) end
     elseif trapShown > 0 then
         for i = 1, trapShown do hideSlot(trapPool[i]) end
         trapShown = 0
     end
 
     renderMs = renderMs * 0.9 + (os.clock() - now) * 1000 * 0.1
+end
+
+connection = RunService.RenderStepped:Connect(RT.frame)
+
+-- watchdog: RenderStepped is the only thing that moves the boxes. If the
+-- connection is dropped (map load, environment rebuild) the overlay keeps its
+-- last frame forever, so the tick is watched and the same callback re-attached.
+task.spawn(function()
+    while running do
+        task.wait(0.5)
+        local now = os.clock()
+        if (RT.beat or 0) > 0 and now - RT.beat > 1.5
+            and now - (RT.lastReconnect or 0) > 2 then
+            RT.lastReconnect = now
+            pcall(function() if connection then connection:Disconnect() end end)
+            local okc, c = pcall(function() return RunService.RenderStepped:Connect(RT.frame) end)
+            connection = (okc and c) or connection
+            RT.reconnects = (RT.reconnects or 0) + 1
+            pcall(RT.ghost)
+        end
+    end
 end)
 
 -- pool growth: 25 slots a second, one at a time
@@ -2385,8 +2427,18 @@ task.spawn(function()
 end)
 
 task.spawn(function()
+    local last = 0
     while running do
-        if RT.isLoaded() and os.clock() >= scBusyUntil then pcall(refreshWorld) end
+        local now = os.clock()
+        -- a live skillcheck pauses scanning on purpose, but a check that keeps
+        -- re-arming -- or one that errors on every tick and rebuilds the track --
+        -- used to hold that gate on indefinitely. The world snapshot then went
+        -- stale and the overlay kept projecting it, which is the frozen ESP with
+        -- a HUD that still shows the last numbers it read.
+        if RT.isLoaded() and (now >= scBusyUntil or now - last > 1.5) then
+            pcall(refreshWorld)
+            last = now
+        end
         task.wait(1 / CFG.pollHz)
     end
 end)
@@ -2430,6 +2482,8 @@ task.spawn(function()
             scTrack = {}
             scStats.errors = scStats.errors + 1
             scStats.error, scStats.status = tostring(err), "read error, retrying"
+            -- an error every tick used to re-arm the busy window every tick
+            scBusyUntil = 0
         end
         -- only a bound prompt needs the high rate; before the first bind the
         -- tick just re-reads the 5 Hz GUI cache
@@ -2595,6 +2649,22 @@ function API.GetConfig()
         hud = CFG.hud, hudAlpha = CFG.hudAlpha, hudGens = CFG.hudGens,
         hudTraps = CFG.hudTraps, hudSurvivors = CFG.hudSurvivors,
         ui = UI ~= nil,
+    }
+end
+
+-- what the overlay is doing right now, so a freeze can be identified instead of
+-- described: renderAge is the age of the last RenderStepped tick
+function API.Health()
+    local now = os.clock()
+    return {
+        renderAge  = (RT.beat or 0) > 0 and (now - RT.beat) or -1,
+        reconnects = RT.reconnects or 0,
+        scBusyFor  = math.max(0, (scBusyUntil or 0) - now),
+        scErrors   = scStats.errors,
+        drawHz     = CFG.drawHz,
+        renderMs   = renderMs,
+        worldMs    = worldMs,
+        err        = CFG.errGen or CFG.errWin or CFG.errPal or CFG.errTrap,
     }
 end
 
@@ -4856,7 +4926,10 @@ end
 task.spawn(function()
     -- a reload replaces __SWANGY_LOAD: a stale instance must stop drawing so
     -- two panels can never stack their text on top of each other
-    while running and _G.__SWANGY_LOAD == loadToken do
+    while running do
+        local tok = _G.__SWANGY_LOAD
+        if tok ~= nil and tok ~= loadToken then break end
+        _G.__SWANGY_LOAD = loadToken
         local ok, err = pcall(HUD.tick)
         if not ok then HUD.lastError = tostring(err) end
         task.wait(ok and (HUD.drag and 1 / 60 or (CFG.hud and 0.08 or 0.25)) or 0.5)
