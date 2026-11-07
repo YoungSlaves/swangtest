@@ -185,6 +185,8 @@ local CFG = {
     vaCrossSize   = 7,    -- arm length of the centre crosshair, pixels
     vaCrossColour = Color3.fromRGB(255, 255, 255),
 
+    fv        = false,   -- always fast vault, game's own SurvivorVault rules
+
     kbw       = true,
 
     hud          = true,
@@ -2528,6 +2530,57 @@ function API.GetConfig()
         ui = UI ~= nil,
     }
 end
+
+-- Always fast vault: the controller asks SurvivorVault.evaluate for a tier from
+-- recent movement samples and sends it with the normal vault request. Those
+-- rules are plain numbers, so rewriting them makes the game itself call a
+-- sprinting vault fast -- nothing is spoofed and no velocity is written.
+-- Matcha's setgc rewrites named GC values with no address resolution, so this
+-- is one atomic call instead of a findgc/applygc address cache.
+RT.fvFast = RT.fvFast or { DISTANCE = 0, REPEAT_DISTANCE = 0, DOT = -1, MIN_SPEED = -1 }
+RT.fvSlow = RT.fvSlow or { DISTANCE = 3, REPEAT_DISTANCE = 3.5, DOT = 0.7071067811865476, MIN_SPEED = 12.5 }
+RT.fvAppliedAt = RT.fvAppliedAt or 0
+RT.fvJob = RT.fvJob or nil
+API.fv = {}
+
+function API.fv.Apply()
+    if type(setgc) ~= "function" then return false, "setgc unavailable" end
+    local ok = pcall(setgc, RT.fvFast)
+    if not ok then return false, "gc write failed" end
+    RT.fvAppliedAt, RT.fvJob = os.clock(), tostring(game.JobId)
+    return true, "fast vault on"
+end
+
+function API.fv.Restore()
+    if type(setgc) == "function" then pcall(setgc, RT.fvSlow) end
+    RT.fvAppliedAt = 0
+end
+
+function API.fv.SetEnabled(on)
+    CFG.fv = on and true or false
+    if CFG.fv then return (API.fv.Apply()) end
+    API.fv.Restore()
+    return true, "off"
+end
+
+function API.fv.Status()
+    if not CFG.fv then return "off" end
+    if RT.fvJob and RT.fvJob ~= tostring(game.JobId) then return "rejoin" end
+    return (RT.fvAppliedAt or 0) > 0 and "on" or "pending"
+end
+
+task.spawn(function()
+    while running do
+        if CFG.fv then
+            local now = os.clock()
+            if not RT.fvJob or RT.fvJob ~= tostring(game.JobId)
+                or (RT.fvAppliedAt or 0) == 0 or (now - RT.fvAppliedAt) > 20 then
+                pcall(API.fv.Apply)
+            end
+        end
+        task.wait(5)
+    end
+end)
 
 function API.Perf()
     return {
@@ -8282,6 +8335,16 @@ local function buildUI()
     end)
 
     local menuGroup = setTab:AddGroupbox({ Side = "Left", Name = "Menu" })
+    local fvToggle = menuGroup:AddToggle("fv_enabled", {
+        Text = "Always fast vault",
+        Default = CFG.fv,
+        Callback = function(on) API.fv.SetEnabled(on) end,
+    })
+    menuGroup:AddLabel({
+        Text = "Relaxes the vault approach rules so a sprinting vault always counts as fast. Needs Matcha's GC API; turning it off restores the defaults.",
+        DoesWrap = true,
+    })
+
     menuGroup:AddKeyPicker("menu_key", {
         Text = "Menu key", Default = "RightShift", CaptureOnly = true,
         ChangedCallback = function(el) UI:SetMenuKey(el.vk) end,
