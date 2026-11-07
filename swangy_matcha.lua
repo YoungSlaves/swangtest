@@ -202,6 +202,9 @@ local CFG = {
     ppHz         = 120,
 
     fv        = false,   -- always fast vault, game's own SurvivorVault rules
+    fvDist     = 0,      -- max approach distance in studs, 0 = any
+    fvAngle    = 180,    -- approach angle in degrees, 180 = any
+    fvSpeed    = 0,      -- min approach speed, 0 = any
 
     kbw       = true,
 
@@ -2549,10 +2552,32 @@ API.fv = {}
 
 function API.fv.Apply()
     if type(setgc) ~= "function" then return false, "setgc unavailable" end
+    -- rebuilt on every apply so the sliders take effect on the next write
+    RT.fvFast.DISTANCE = CFG.fvDist
+    RT.fvFast.REPEAT_DISTANCE = CFG.fvDist
+    RT.fvFast.DOT = math.cos(math.rad(CFG.fvAngle))
+    RT.fvFast.MIN_SPEED = (CFG.fvSpeed > 0) and CFG.fvSpeed or -1
     local ok = pcall(setgc, RT.fvFast)
     if not ok then return false, "gc write failed" end
     RT.fvAppliedAt, RT.fvJob = os.clock(), tostring(game.JobId)
     return true, "fast vault on"
+end
+
+function API.fv.SetOption(key, value)
+    value = tonumber(value)
+    if not value then return false end
+    key = tostring(key)
+    if key == "distance" then
+        CFG.fvDist = math.max(0, value)
+    elseif key == "angle" then
+        CFG.fvAngle = math.clamp(value, 0, 180)
+    elseif key == "speed" then
+        CFG.fvSpeed = math.max(0, value)
+    else
+        return false
+    end
+    if CFG.fv then pcall(API.fv.Apply) end
+    return true
 end
 
 function API.fv.Restore()
@@ -8808,6 +8833,34 @@ local function buildUI()
         end
     end)
 
+    -- fast vault lives on Main with its own thresholds: the three numbers the
+    -- game's vault tier check reads are exposed instead of baked in
+    local fvGroup = mainTab:AddGroupbox({ Side = "Left", Name = "Fast vault", Description = "vault approach rules" })
+    fvGroup:AddToggle("fv_enabled", {
+        Text = "Always fast vault",
+        Default = CFG.fv,
+        Callback = function(on) API.fv.SetEnabled(on) end,
+    })
+    fvGroup:AddSlider("fv_dist", {
+        Text = "Max approach distance", Default = CFG.fvDist,
+        Min = 0, Max = 4, Rounding = 2, Suffix = " studs",
+        Callback = function(v) API.fv.SetOption("distance", v) end,
+    })
+    fvGroup:AddSlider("fv_angle", {
+        Text = "Approach angle", Default = CFG.fvAngle,
+        Min = 0, Max = 180, Rounding = 5, Suffix = " deg",
+        Callback = function(v) API.fv.SetOption("angle", v) end,
+    })
+    fvGroup:AddSlider("fv_speed", {
+        Text = "Min approach speed", Default = CFG.fvSpeed,
+        Min = 0, Max = 24, Rounding = 1,
+        Callback = function(v) API.fv.SetOption("speed", v) end,
+    })
+    fvGroup:AddLabel({
+        Text = "0 studs, 180 deg and 0 speed accept any approach and make every sprinting vault fast. Tightening them only changes when the game itself calls it fast.",
+        DoesWrap = true,
+    })
+
     local espGroup = visTab:AddGroupbox({ Side = "Left", Name = "ESP", Description = "boxes and nametags" })
 
     espGroup:AddToggle("esp_gen", {
@@ -8970,16 +9023,6 @@ local function buildUI()
     end)
 
     local menuGroup = setTab:AddGroupbox({ Side = "Left", Name = "Menu" })
-    local fvToggle = menuGroup:AddToggle("fv_enabled", {
-        Text = "Always fast vault",
-        Default = CFG.fv,
-        Callback = function(on) API.fv.SetEnabled(on) end,
-    })
-    menuGroup:AddLabel({
-        Text = "Relaxes the vault approach rules so a sprinting vault always counts as fast. Needs Matcha's GC API; turning it off restores the defaults.",
-        DoesWrap = true,
-    })
-
     menuGroup:AddKeyPicker("menu_key", {
         Text = "Menu key", Default = "RightShift", CaptureOnly = true,
         ChangedCallback = function(el) UI:SetMenuKey(el.vk) end,
