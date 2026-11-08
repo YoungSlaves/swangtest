@@ -310,7 +310,7 @@ local FONT   = (Drawing.Fonts and (Drawing.Fonts.SystemBold or Drawing.Fonts.Sys
 -- only repositioned after that (the render callback stays creation-free).
 RT.load = {
     active = false, p = 0, i = 0,
-    items = { "ui library", "menu + hud", "map scan", "pallets + traps", "first frame", "ready" },
+    items = { "map scan", "pallets + traps", "esp", "menu", "ready" },
     w = 384, h = 216,
     bgCol   = Color3.fromRGB(14, 14, 18),
     edgeCol = Color3.fromRGB(124, 92, 255),
@@ -2623,6 +2623,8 @@ RT.frame = function()
     _G.__SWANGY_LOAD = loadToken
     local now = os.clock()
     RT.beat = now
+    -- nothing but the loading screen is on screen until every item is done
+    if RT.load and RT.load.active then return end
     if CFG.drawHz > 0 and now - (CFG.lastFrame or 0) < 1 / CFG.drawHz then return end
     CFG.lastFrame = now
     frameN = frameN + 1
@@ -8435,6 +8437,10 @@ local function buildUI()
         Accent = Color3.fromRGB(124, 92, 255),
     })
 
+    -- built closed: the boot thread opens it once the last item is done, so a
+    -- half-built menu can never open on top of the loading screen
+    if RT.load.active then pcall(function() uiWindow:Toggle(false) end) end
+
     local mainTab = uiWindow:AddTab("Main", "user")
     local aimTab = uiWindow:AddTab("Aim", "crosshair")
     local visTab = uiWindow:AddTab("Visuals", "eye")
@@ -9337,13 +9343,47 @@ end
 -- boot. everything below runs in a thread that yields between the items: the
 -- exec call blocks the game for as long as it runs, so the loading screen is
 -- built first and the chunk returns straight after, which is the only way it is
--- ever seen. nothing of the overlay is shown until its own item is done.
+-- ever seen. the overlay draws nothing and the menu stays shut until the last
+-- item is done, so the screen is the only thing on screen while it works.
 RT.bootAt = os.clock()
 RT.load.setup()
-RT.load.stage(1)
+RT.load.stage(1, "waiting for the map")
 _G.__SWANGY = API
 
 task.spawn(function()
+    task.wait(0.05)
+    -- the map streams in, and reading it before that is the one thing that
+    -- hard-crashes this VM, so the bar waits where it is
+    while running and not RT.isLoaded() do task.wait(0.2) end
+    if not running then RT.load.destroy() return end
+    task.wait(0.4)
+    if not running then RT.load.destroy() return end
+
+    RT.load.status("generators + windows")
+    local scanAt = os.clock()
+    local okw, errw = pcall(refreshWorld)
+    RT.load.stage(2)
+    task.wait(0.05)
+    if not running then RT.load.destroy() return end
+    local okp, errp = pcall(refreshPallets)
+    pcall(print, string.format("[swangy] first scan: gen=%d win=%d pal=%d trap=%d drawings=%d in %.1fs%s%s",
+        #genList, #winList, #palList, #trapList, RT.draw, os.clock() - scanAt,
+        okw and "" or (" world=" .. tostring(errw)),
+        okp and "" or (" pal=" .. tostring(errp))))
+
+    -- the pools are built 25 slots a second so creating them stays smooth; the
+    -- overlay is still drawing nothing at this point
+    RT.load.stage(3, "building the esp")
+    local deadline, left = os.clock() + 6, 1
+    while running and os.clock() < deadline and left > 0 do
+        left = 0
+        for _, w in pairs(RT.want) do left = left + w.n end
+        left = left - (#genPool + #winPool + #palPool + #trapPool)
+        if left > 0 then task.wait(0.1) end
+    end
+    if not running then RT.load.destroy() return end
+
+    RT.load.stage(4, "menu")
     task.wait(0.05)
     local okM, resM = pcall(buildMatchaUI)
     if not okM or resM == false then
@@ -9357,49 +9397,14 @@ task.spawn(function()
     end
     API.ui = UI
     RT.safe()
-    pcall(print, string.format("[swangy] ui up: %s in %.1fs (load v2)",
+    pcall(print, string.format("[swangy] ui up: %s in %.1fs (load v3)",
         tostring(type(UI) == "table" and "ok" or "none"),
         os.clock() - (RT.bootAt or os.clock())))
-    -- the menu owns hundreds of drawings of its own and the newest one wins, so
-    -- the screen is rebuilt on top of it now that it exists
+    -- the window was built closed, so this handover is the menu appearing
+    -- underneath a bar that is already full, not the other way round
+    pcall(function() if uiWindow and uiWindow.Toggle then uiWindow:Toggle(true) end end)
     RT.load.raise()
-    RT.load.stage(2)
-    task.wait(0.05)
-    if not running then RT.load.destroy() return end
-
-    -- the map streams in, and reading it before that is the one thing that
-    -- hard-crashes this VM, so the bar waits where it is
-    RT.load.stage(3, "waiting for the map")
-    while running and not RT.isLoaded() do task.wait(0.2) end
-    if not running then RT.load.destroy() return end
-    task.wait(0.5)
-    if not running then RT.load.destroy() return end
-
-    RT.load.status("generators + windows")
-    local scanAt = os.clock()
-    local okw, errw = pcall(refreshWorld)
-    RT.load.stage(4)
-    task.wait(0.05)
-    if not running then RT.load.destroy() return end
-    local okp, errp = pcall(refreshPallets)
-    pcall(print, string.format("[swangy] first scan: gen=%d win=%d pal=%d trap=%d drawings=%d in %.1fs%s%s",
-        #genList, #winList, #palList, #trapList, RT.draw, os.clock() - scanAt,
-        okw and "" or (" world=" .. tostring(errw)),
-        okp and "" or (" pal=" .. tostring(errp))))
-
-    -- the pools are built 25 slots a second so the screen stays smooth while
-    -- they are created; the last item is the overlay finishing, not the scan
-    RT.load.stage(5, "building the esp")
-    local deadline, left = os.clock() + 6, 1
-    while running and os.clock() < deadline and left > 0 do
-        left = 0
-        for _, w in pairs(RT.want) do left = left + w.n end
-        left = left - (#genPool + #winPool + #palPool + #trapPool)
-        if left > 0 then task.wait(0.1) end
-    end
-    if not running then RT.load.destroy() return end
-
-    RT.load.stage(6)
+    RT.load.stage(5)
     task.wait(0.45)
     RT.load.finish()
     if type(notify) == "function" then
