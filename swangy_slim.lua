@@ -8779,11 +8779,13 @@ RT.load.stage(1, "waiting for the map")
 _G.__SWANGY = API
 
 task.spawn(function()
-    -- five seconds of nothing but the word. no scan, no menu, no esp: the game
-    -- stays playable while it is up, which is the whole point of showing it
-    task.wait(5)
+    -- the word is already painted, so the build starts right now and runs
+    -- behind it. nothing is drawn while it works (RT.frame returns while the
+    -- screen is up), so the first frame that shows anything is the reveal at the
+    -- bottom, five seconds after the chunk started
+    task.wait(0.05)
     -- the map streams in, and reading it before that is the one thing that
-    -- hard-crashes this VM, so the load waits where it is
+    -- hard-crashes this VM, so the build waits where it is
     while running and not RT.isLoaded() do task.wait(0.2) end
     if not running then RT.load.destroy() return end
     task.wait(0.4)
@@ -8824,19 +8826,21 @@ task.spawn(function()
     end
     API.ui = UI
     RT.safe()
-    pcall(print, string.format("[swangy] ui up: %s in %.1fs (load v5)",
+    pcall(print, string.format("[swangy] ui up: %s in %.1fs (load v6)",
         tostring(type(UI) == "table" and "ok" or "none"),
         os.clock() - (RT.bootAt or os.clock())))
 
-    -- the screen is hidden first and opened after: the menu can never appear
-    -- over a panel that is still being taken down
-    RT.load.stage(5)
-    task.wait(0.3)
-    RT.load.finish()
-    task.wait(0.25)
+    -- reveal. if the build finished before the five seconds are up, hold the
+    -- word until they are; then drop the text and open the menu in the same
+    -- step, so the esp, the hud and the menu all appear together
+    local upAt = os.clock() - (RT.bootAt or os.clock())
+    while running and upAt < 5 do
+        task.wait(0.1)
+        upAt = os.clock() - (RT.bootAt or os.clock())
+    end
     pcall(RT.load.destroy)
     pcall(function() if uiWindow and uiWindow.Toggle then uiWindow:Toggle(true) end end)
-    pcall(print, string.format("[swangy] loaded in %.1fs", os.clock() - (RT.bootAt or os.clock())))
+    pcall(print, string.format("[swangy] loaded in %.1fs", upAt))
     if type(notify) == "function" then
         notify("esp + skillcheck + veil aim", "Swangy", 4)
     end
