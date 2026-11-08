@@ -310,7 +310,7 @@ local FONT   = (Drawing.Fonts and (Drawing.Fonts.SystemBold or Drawing.Fonts.Sys
 -- only repositioned after that (the render callback stays creation-free).
 RT.load = {
     active = false, p = 0, i = 0,
-    items = { "ui library", "menu + hud", "map scan", "pallets + traps", "ready" },
+    items = { "ui library", "menu + hud", "map scan", "pallets + traps", "first frame", "ready" },
     w = 384, h = 216,
     bgCol   = Color3.fromRGB(14, 14, 18),
     edgeCol = Color3.fromRGB(124, 92, 255),
@@ -385,14 +385,15 @@ RT.load.setup = function()
         if not ok or not o then return nil end
         d[#d + 1] = o
         for k, v in pairs(props) do pcall(function() o[k] = v end) end
+        pcall(function() o.ZIndex = 600 end)
         return o
     end
-    r.bg = mk("Square", { Filled = true, Color = L.bgCol, Transparency = 0.93, Thickness = 1 })
-    r.edge = mk("Square", { Filled = false, Color = L.edgeCol, Transparency = 0.5, Thickness = 1 })
+    r.bg = mk("Square", { Filled = true, Color = L.bgCol, Transparency = 0.95, Thickness = 1, Corner = 4 })
+    r.edge = mk("Square", { Filled = false, Color = L.edgeCol, Transparency = 0.5, Thickness = 1, Corner = 4 })
     r.title = mk("Text", { Text = "SWANGY", Size = 20, Center = true, Outline = true, Color = L.textCol, Transparency = 1 })
-    r.sub = mk("Text", { Text = "veil spear + esp", Size = 12, Center = true, Outline = true, Color = L.dimCol, Transparency = 0.8 })
-    r.barBg = mk("Square", { Filled = true, Color = Color3.fromRGB(38, 38, 46), Transparency = 0.85 })
-    r.bar = mk("Square", { Filled = true, Color = L.fillCol, Transparency = 1 })
+    r.sub = mk("Text", { Text = "veil spear + esp   |   load v2", Size = 12, Center = true, Outline = true, Color = L.dimCol, Transparency = 0.8 })
+    r.barBg = mk("Square", { Filled = true, Color = Color3.fromRGB(38, 38, 46), Transparency = 0.85, Corner = 2 })
+    r.bar = mk("Square", { Filled = true, Color = L.fillCol, Transparency = 1, Corner = 2 })
     r.pct = mk("Text", { Text = "0%", Size = 12, Center = false, Outline = true, Color = L.fillCol, Transparency = 1 })
     r.status = mk("Text", { Text = "starting", Size = 13, Center = false, Outline = true, Color = L.textCol, Transparency = 1 })
     r.rows = {}
@@ -413,6 +414,7 @@ end
 
 RT.load.status = function(text)
     local L = RT.load
+    L.msg = text
     if not L.d or not L.r or not L.r.status then return end
     pcall(function() L.r.status.Text = text end)
 end
@@ -445,10 +447,26 @@ RT.load.stage = function(i, text)
     end
     if text then
         L.status(text)
-    elseif r.status then
-        pcall(function() r.status.Text = L.items[i] .. "..." end)
+    else
+        L.msg = L.items[i] .. "..."
+        if r.status then pcall(function() r.status.Text = L.msg end) end
     end
     L.frac((i - 1) / #L.items)
+end
+
+-- rebuilt after the menu exists: at equal depth the drawing created last is the
+-- one on top, and every drawing here also carries a high ZIndex for the
+-- renderers that honour it. both are created outside the render callback.
+RT.load.raise = function()
+    local L = RT.load
+    if not L.d then return end
+    local i, msg, p = L.i, L.msg, L.p
+    RT.load.destroy()
+    RT.load.setup()
+    if i and i > 0 then
+        RT.load.stage(i, msg)
+        if p then L.frac(p) end
+    end
 end
 
 RT.load.finish = function()
@@ -1237,7 +1255,10 @@ local function collectWindows()
     -- this loop owns the VM until the last descendant has been read through
     -- interop, and nothing else -- the overlay, the menu, the input loop -- runs.
     for i = 1, #desc do
-        if i % 500 == 0 then task.wait() end
+        if i % 500 == 0 then
+            task.wait()
+            if RT.load.active then RT.load.sub(0.1 + 0.45 * i / #desc) end
+        end
         local inst = desc[i]
         local okc, nm = pcall(RT.io.name, inst)
         if okc and nm and lower(nm):find("window", 1, true) then
@@ -1285,7 +1306,10 @@ local function collectWindows()
 
     local out = {}
     for i = 1, #candidates do
-        if i % 32 == 0 then task.wait() end
+        if i % 32 == 0 then
+            task.wait()
+            if RT.load.active then RT.load.sub(0.6 + 0.3 * i / #candidates) end
+        end
         local k = candidates[i]
         local okn, nm = pcall(RT.io.name, k)
         if (not anyBottom) or (okn and nm and lower(nm) == "bottom") then
@@ -1457,7 +1481,10 @@ local function collectPallets()
     local list, newIndex = {}, {}
     local now = os.clock()
     for pi, model in ipairs(items) do
-        if pi % 16 == 0 then task.wait() end
+        if pi % 16 == 0 then
+            task.wait()
+            if RT.load.active then RT.load.sub(pi / #items) end
+        end
         local modelKey = palletAddress(model)
         local parts = modelKey and palParts[modelKey]
         if not parts then
@@ -2489,6 +2516,7 @@ local function refreshWorld()
 
     else
         genDiscoverStamp, genDiscoverAt = stamp, os.clock() + 30
+        if RT.load.active then RT.load.status("generators") end
         local found = collectGens()
         local kept = {}
         for _, t in ipairs(found) do
@@ -2531,6 +2559,7 @@ local function refreshWorld()
         -- one full pass a second, like the reference: cheap enough in the poll
         -- loop, and a window is never missed because it streamed in late
         if t >= winScanAt then
+            if RT.load.active then RT.load.status("windows") end
             local found = collectWindows()
             if found then
                 local n = #found
@@ -9308,7 +9337,7 @@ end
 -- boot. everything below runs in a thread that yields between the items: the
 -- exec call blocks the game for as long as it runs, so the loading screen is
 -- built first and the chunk returns straight after, which is the only way it is
--- ever seen. the steps themselves are unchanged.
+-- ever seen. nothing of the overlay is shown until its own item is done.
 RT.bootAt = os.clock()
 RT.load.setup()
 RT.load.stage(1)
@@ -9328,9 +9357,12 @@ task.spawn(function()
     end
     API.ui = UI
     RT.safe()
-    pcall(print, string.format("[swangy] ui up: %s in %.1fs",
+    pcall(print, string.format("[swangy] ui up: %s in %.1fs (load v2)",
         tostring(type(UI) == "table" and "ok" or "none"),
         os.clock() - (RT.bootAt or os.clock())))
+    -- the menu owns hundreds of drawings of its own and the newest one wins, so
+    -- the screen is rebuilt on top of it now that it exists
+    RT.load.raise()
     RT.load.stage(2)
     task.wait(0.05)
     if not running then RT.load.destroy() return end
@@ -9340,7 +9372,7 @@ task.spawn(function()
     RT.load.stage(3, "waiting for the map")
     while running and not RT.isLoaded() do task.wait(0.2) end
     if not running then RT.load.destroy() return end
-    task.wait(0.8)
+    task.wait(0.5)
     if not running then RT.load.destroy() return end
 
     RT.load.status("generators + windows")
@@ -9355,8 +9387,20 @@ task.spawn(function()
         okw and "" or (" world=" .. tostring(errw)),
         okp and "" or (" pal=" .. tostring(errp))))
 
-    RT.load.stage(5)
-    task.wait(0.4)
+    -- the pools are built 25 slots a second so the screen stays smooth while
+    -- they are created; the last item is the overlay finishing, not the scan
+    RT.load.stage(5, "building the esp")
+    local deadline, left = os.clock() + 6, 1
+    while running and os.clock() < deadline and left > 0 do
+        left = 0
+        for _, w in pairs(RT.want) do left = left + w.n end
+        left = left - (#genPool + #winPool + #palPool + #trapPool)
+        if left > 0 then task.wait(0.1) end
+    end
+    if not running then RT.load.destroy() return end
+
+    RT.load.stage(6)
+    task.wait(0.45)
     RT.load.finish()
     if type(notify) == "function" then
         notify("esp + skillcheck + veil aim", "Swangy", 4)
