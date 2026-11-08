@@ -302,11 +302,7 @@ local COL = {
 -- Matcha builds differ here; indexing a missing Drawing.Fonts is a
 -- chunk-level error that kills the script before any pcall can catch it
 local FONT   = (Drawing.Fonts and (Drawing.Fonts.SystemBold or Drawing.Fonts.System)) or nil
-local EDGES  = {
-    {1,2},{2,4},{4,3},{3,1},
-    {5,6},{6,8},{8,7},{7,5},
-    {1,5},{2,6},{3,7},{4,8},
-}
+-- no edge table any more: boxes are stroked as one hull, like the reference
 local CORNER = {
     {-1,-1,-1},{ 1,-1,-1},{-1, 1,-1},{ 1, 1,-1},
     {-1,-1, 1},{ 1,-1, 1},{-1, 1, 1},{ 1, 1, 1},
@@ -416,12 +412,20 @@ end
 -- sorted copy and a comparator closure per filled box per frame.
 local HULL = { x = {}, y = {}, ord = {}, hull = {} }
 
-local function fillHull(e, n, colour, fillAlpha)
+-- The whole box is one hull: the monotone chain over the projected corners is
+-- stroked as a single closed loop and fanned with triangles, which is exactly
+-- what the reference does per box. Stroking the twelve cube edges instead put
+-- four lines across the middle of every box, so the fill sat behind a cage and
+-- never read as a shape.
+local function fillHull(e, n, colour, fillAlpha, thick)
     if n < 3 then
+        for i = 1, 12 do
+            if e.lvis[i] then e.lvis[i] = false; e.lines[i].Visible = false end
+        end
         if e.tris[1].Visible then
             for i = 1, 6 do e.tris[i].Visible = false end
         end
-        return
+        return 0
     end
     local hX, hY = HULL.x, HULL.y
     local hOrd, hHull = HULL.ord, HULL.hull
@@ -466,8 +470,42 @@ local function fillHull(e, n, colour, fillAlpha)
     end
     h = h - 1
 
-    local tri = 0
+    -- outline first: the hull as one closed loop, the way the reference strokes
+    -- it. Every line object is dirty-checked, so a box that has not moved costs
+    -- four property compares per edge and no writes.
+    local lf, lt, lth, lcol, lvis = e.lf, e.lt, e.lth, e.lcol, e.lvis
+    local shown = 0
     if h >= 3 then
+        for i = 1, h do
+            local a, b = hHull[i], hHull[i % h + 1]
+            local x1, y1, x2, y2 = hX[a], hY[a], hX[b], hY[b]
+            local ln = e.lines[i]
+            local f = lf[i]
+            if not f or f[1] ~= x1 or f[2] ~= y1 then
+                ln.From = Vector2.new(x1, y1)
+                if f then f[1], f[2] = x1, y1 else lf[i] = { x1, y1 } end
+            end
+            local t = lt[i]
+            if not t or t[1] ~= x2 or t[2] ~= y2 then
+                ln.To = Vector2.new(x2, y2)
+                if t then t[1], t[2] = x2, y2 else lt[i] = { x2, y2 } end
+            end
+            if lth[i] ~= thick then lth[i] = thick; ln.Thickness = thick end
+            if lcol[i] ~= colour then
+                lcol[i] = colour
+                ln.Color = colour
+                ln.Transparency = 1
+            end
+            if not lvis[i] then lvis[i] = true; ln.Visible = true end
+            shown = shown + 1
+        end
+    end
+    for i = shown + 1, 12 do
+        if lvis[i] then lvis[i] = false; e.lines[i].Visible = false end
+    end
+
+    local tri = 0
+    if fillAlpha and h >= 3 then
         local ax, ay = hX[hHull[1]], hY[hHull[1]]
         for i = 2, h - 1 do
             if tri >= 6 then break end
@@ -485,6 +523,7 @@ local function fillHull(e, n, colour, fillAlpha)
     for i = tri + 1, 6 do
         if e.tris[i].Visible then e.tris[i].Visible = false end
     end
+    return shown
 end
 
 local R_AXIS, U_AXIS, B_AXIS = Vector3.new(1, 0, 0), Vector3.new(0, 1, 0), Vector3.new(0, 0, 1)
@@ -618,8 +657,7 @@ local function drawBox(e, center, hx, hy, hz, right, up, back, colour, fillAlpha
         end
     end
 
-    local lf, lt, lth, lcol, lvis = e.lf, e.lt, e.lth, e.lcol, e.lvis
-    local shown, topY, botY = 0, math.huge, -math.huge
+    local topY, botY = math.huge, -math.huge
     for i = 1, 8 do
         local y = py[i]
         if y then
@@ -627,46 +665,9 @@ local function drawBox(e, center, hx, hy, hz, right, up, back, colour, fillAlpha
             if y > botY then botY = y end
         end
     end
-    for i = 1, 12 do
-        local ed = EDGES[i]
-        local ia, ib = ed[1], ed[2]
-        local x1, y1, x2, y2 = px[ia], py[ia], px[ib], py[ib]
-        local ln = e.lines[i]
-        if x1 and y1 and x2 and y2 then
-            local f = lf[i]
-            if not f or f[1] ~= x1 or f[2] ~= y1 then
-                ln.From = Vector2.new(x1, y1)
-                if f then f[1], f[2] = x1, y1 else lf[i] = { x1, y1 } end
-            end
-            local t = lt[i]
-            if not t or t[1] ~= x2 or t[2] ~= y2 then
-                ln.To = Vector2.new(x2, y2)
-                if t then t[1], t[2] = x2, y2 else lt[i] = { x2, y2 } end
-            end
-            if lth[i] ~= thick then lth[i] = thick; ln.Thickness = thick end
-            if lcol[i] ~= colour then
-                lcol[i] = colour
-                ln.Color = colour
-                ln.Transparency = 1
-            end
-            if not lvis[i] then lvis[i] = true; ln.Visible = true end
-            shown = shown + 1
-        elseif lvis[i] then
-            lvis[i] = false
-            ln.Visible = false
-        end
-    end
-
-    -- the reference fills whenever the hull has three points, and so does this:
-    -- waiting for all eight corners left a hole in every box that straddled the
-    -- screen edge, which is most of them at a 1000 stud range
-    if fillAlpha and hn >= 3 then
-        fillHull(e, hn, colour, fillAlpha)
-    elseif e.tris[1].Visible then
-        for i = 1, 6 do e.tris[i].Visible = false end
-    end
-
-    if shown == 0 then return nil end
+    -- one hull, stroked and filled: the same single pass the reference makes per
+    -- box, and the reason its boxes look like shapes rather than open cages
+    if fillHull(e, hn, colour, fillAlpha, thick) == 0 then return nil end
     e.hid = false
     -- the projected bounds ride back to the caller so the label does not need
     -- two more projections of the same object. false (not nil) marks a cull, so
