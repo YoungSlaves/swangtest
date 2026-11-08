@@ -320,10 +320,14 @@ RT.load = {
     textCol = Color3.fromRGB(238, 238, 244),
 }
 
+-- hiding, not just removing: Remove() does not reliably take a drawing off
+-- screen in this VM (a panel outlived the whole load and sat over the menu), so
+-- every object is made invisible first and only then handed to Remove.
 RT.load.destroy = function()
     local L = RT.load
     local d = L.d
     if not d then return end
+    for i = 1, #d do pcall(function() d[i].Visible = false end) end
     L.d, L.r, L.active = nil, nil, false
     for i = 1, #d do pcall(function() d[i]:Remove() end) end
 end
@@ -391,7 +395,7 @@ RT.load.setup = function()
     r.bg = mk("Square", { Filled = true, Color = L.bgCol, Transparency = 0.95, Thickness = 1, Corner = 4 })
     r.edge = mk("Square", { Filled = false, Color = L.edgeCol, Transparency = 0.5, Thickness = 1, Corner = 4 })
     r.title = mk("Text", { Text = "SWANGY", Size = 20, Center = true, Outline = true, Color = L.textCol, Transparency = 1 })
-    r.sub = mk("Text", { Text = "veil spear + esp   |   load v3", Size = 12, Center = true, Outline = true, Color = L.dimCol, Transparency = 0.8 })
+    r.sub = mk("Text", { Text = "veil spear + esp   |   load v4", Size = 12, Center = true, Outline = true, Color = L.dimCol, Transparency = 0.8 })
     r.barBg = mk("Square", { Filled = true, Color = Color3.fromRGB(38, 38, 46), Transparency = 0.85, Corner = 2 })
     r.bar = mk("Square", { Filled = true, Color = L.fillCol, Transparency = 1, Corner = 2 })
     r.pct = mk("Text", { Text = "0%", Size = 12, Center = false, Outline = true, Color = L.fillCol, Transparency = 1 })
@@ -454,21 +458,6 @@ RT.load.stage = function(i, text)
     L.frac((i - 1) / #L.items)
 end
 
--- rebuilt after the menu exists: at equal depth the drawing created last is the
--- one on top, and every drawing here also carries a high ZIndex for the
--- renderers that honour it. both are created outside the render callback.
-RT.load.raise = function()
-    local L = RT.load
-    if not L.d then return end
-    local i, msg, p = L.i, L.msg, L.p
-    RT.load.destroy()
-    RT.load.setup()
-    if i and i > 0 then
-        RT.load.stage(i, msg)
-        if p then L.frac(p) end
-    end
-end
-
 RT.load.finish = function()
     local L = RT.load
     if not L.d then return end
@@ -480,10 +469,6 @@ RT.load.finish = function()
         end
     end
     L.status("loaded")
-    task.spawn(function()
-        task.wait(1.2)
-        RT.load.destroy()
-    end)
 end
 
 local CORNER = {
@@ -8441,9 +8426,25 @@ local function buildUI()
     if RT.load.active then pcall(function() uiWindow:Toggle(false) end) end
 
     local mainTab = uiWindow:AddTab("Main", "user")
+    if RT.load.active then
+        RT.load.sub(0.2)
+        task.wait()
+    end
     local aimTab = uiWindow:AddTab("Aim", "crosshair")
+    if RT.load.active then
+        RT.load.sub(0.45)
+        task.wait()
+    end
     local visTab = uiWindow:AddTab("Visuals", "eye")
+    if RT.load.active then
+        RT.load.sub(0.65)
+        task.wait()
+    end
     local hudTab = uiWindow:AddTab("HUD", "list")
+    if RT.load.active then
+        RT.load.sub(0.8)
+        task.wait()
+    end
     local setTab = uiWindow:AddTab("Settings", "settings")
 
     local scGroup = mainTab:AddGroupbox({ Side = "Left", Name = "Skillcheck", Description = "generators + butcher trap" })
@@ -8873,7 +8874,7 @@ end
 -- boot. everything below runs in a thread that yields between the items: the
 -- exec call blocks the game for as long as it runs, so the loading screen is
 -- built first and the chunk returns straight after, which is the only way it is
--- ever seen. the overlay draws nothing and the menu stays shut until the last
+-- ever seen. the overlay draws nothing and the menu stays closed until the last
 -- item is done, so the screen is the only thing on screen while it works.
 RT.bootAt = os.clock()
 RT.load.setup()
@@ -8902,7 +8903,7 @@ task.spawn(function()
         okp and "" or (" pal=" .. tostring(errp))))
 
     -- the pools are built 25 slots a second so creating them stays smooth; the
-    -- overlay is still drawing nothing at this point
+    -- overlay draws nothing until the very end, so this is a real wait
     RT.load.stage(3, "building the esp")
     local deadline, left = os.clock() + 6, 1
     while running and os.clock() < deadline and left > 0 do
@@ -8913,6 +8914,9 @@ task.spawn(function()
     end
     if not running then RT.load.destroy() return end
 
+    -- the menu is the longest single step; buildUI yields between its tabs so
+    -- the bar keeps moving instead of the screen sitting still for the whole
+    -- build
     RT.load.stage(4, "menu")
     task.wait(0.05)
     local uiOk, uiErr = pcall(buildUI)
@@ -8921,16 +8925,19 @@ task.spawn(function()
     end
     API.ui = UI
     RT.safe()
-    pcall(print, string.format("[swangy] ui up: %s in %.1fs (load v3)",
+    pcall(print, string.format("[swangy] ui up: %s in %.1fs (load v4)",
         tostring(type(UI) == "table" and "ok" or "none"),
         os.clock() - (RT.bootAt or os.clock())))
-    -- the window was built closed, so this handover is the menu appearing
-    -- underneath a bar that is already full, not the other way round
-    pcall(function() if uiWindow and uiWindow.Toggle then uiWindow:Toggle(true) end end)
-    RT.load.raise()
+
+    -- the screen is hidden first and opened after: the menu can never appear
+    -- over a panel that is still being taken down
     RT.load.stage(5)
-    task.wait(0.45)
+    task.wait(0.3)
     RT.load.finish()
+    task.wait(0.25)
+    pcall(RT.load.destroy)
+    pcall(function() if uiWindow and uiWindow.Toggle then uiWindow:Toggle(true) end end)
+    pcall(print, string.format("[swangy] loaded in %.1fs", os.clock() - (RT.bootAt or os.clock())))
     if type(notify) == "function" then
         notify("esp + skillcheck + veil aim", "Swangy", 4)
     end
