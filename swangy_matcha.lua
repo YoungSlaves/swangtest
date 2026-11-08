@@ -303,6 +303,171 @@ local COL = {
 -- chunk-level error that kills the script before any pcall can catch it
 local FONT   = (Drawing.Fonts and (Drawing.Fonts.SystemBold or Drawing.Fonts.System)) or nil
 -- no edge table any more: boxes are stroked as one hull, like the reference
+-- loading screen. the exec call blocks the game for as long as it runs, so a
+-- progress bar is only ever seen if something yields between the steps: the
+-- chunk builds the screen and hands the real boot to a thread, which returns
+-- to the game between every item. Every drawing is created here, once, and
+-- only repositioned after that (the render callback stays creation-free).
+RT.load = {
+    active = false, p = 0, i = 0,
+    items = { "ui library", "menu + hud", "map scan", "pallets + traps", "ready" },
+    w = 384, h = 216,
+    bgCol   = Color3.fromRGB(14, 14, 18),
+    edgeCol = Color3.fromRGB(124, 92, 255),
+    fillCol = Color3.fromRGB(124, 92, 255),
+    dimCol  = Color3.fromRGB(150, 150, 162),
+    okCol   = Color3.fromRGB(80, 255, 120),
+    textCol = Color3.fromRGB(238, 238, 244),
+}
+
+RT.load.destroy = function()
+    local L = RT.load
+    local d = L.d
+    if not d then return end
+    L.d, L.r, L.active = nil, nil, false
+    for i = 1, #d do pcall(function() d[i]:Remove() end) end
+end
+
+RT.load.frac = function(p)
+    local L = RT.load
+    local r = L.r
+    if not r or not r.bar then return end
+    if p < 0 then p = 0 elseif p > 1 then p = 1 end
+    L.p = p
+    local bw = (L.barW or 0) * p
+    if bw < 1 then bw = 1 end
+    pcall(function()
+        r.bar.Position = Vector2.new(L.barX, L.barY)
+        r.bar.Size = Vector2.new(bw, L.barH)
+        r.pct.Text = string.format("%d%%", math.floor(p * 100 + 0.5))
+        r.pct.Position = Vector2.new(L.barX + L.barW - 40, L.barY - 19)
+    end)
+end
+
+RT.load.place = function()
+    local L = RT.load
+    local r = L.r
+    if not r or not r.bg then return end
+    local vx, vy = 1280, 720
+    pcall(function()
+        local cam = Workspace.CurrentCamera
+        local vp = cam and cam.ViewportSize
+        if vp and vp.X and vp.X > 0 then vx, vy = vp.X, vp.Y end
+    end)
+    local w, h = L.w, L.h
+    local x, y = math.floor((vx - w) / 2), math.floor((vy - h) / 2)
+    if x < 0 then x = 0 end
+    if y < 0 then y = 0 end
+    local pad, barH = 26, 10
+    L.x, L.y = x, y
+    L.barX, L.barY, L.barW, L.barH = x + pad, y + 84, w - pad * 2, barH
+    pcall(function()
+        r.bg.Position, r.bg.Size = Vector2.new(x, y), Vector2.new(w, h)
+        r.edge.Position, r.edge.Size = Vector2.new(x, y), Vector2.new(w, h)
+        r.title.Position = Vector2.new(x + w / 2, y + 18)
+        r.sub.Position = Vector2.new(x + w / 2, y + 44)
+        r.barBg.Position = Vector2.new(L.barX, L.barY)
+        r.barBg.Size = Vector2.new(L.barW, barH)
+        r.status.Position = Vector2.new(L.barX, L.barY + 22)
+        for i = 1, #r.rows do
+            r.rows[i].Position = Vector2.new(L.barX + 4, L.barY + 44 + (i - 1) * 15)
+        end
+    end)
+    L.frac(L.p or 0)
+end
+
+RT.load.setup = function()
+    local L = RT.load
+    if L.d then return end
+    local d, r = {}, {}
+    local function mk(kind, props)
+        local ok, o = pcall(function() return Drawing.new(kind) end)
+        if not ok or not o then return nil end
+        d[#d + 1] = o
+        for k, v in pairs(props) do pcall(function() o[k] = v end) end
+        return o
+    end
+    r.bg = mk("Square", { Filled = true, Color = L.bgCol, Transparency = 0.93, Thickness = 1 })
+    r.edge = mk("Square", { Filled = false, Color = L.edgeCol, Transparency = 0.5, Thickness = 1 })
+    r.title = mk("Text", { Text = "SWANGY", Size = 20, Center = true, Outline = true, Color = L.textCol, Transparency = 1 })
+    r.sub = mk("Text", { Text = "veil spear + esp", Size = 12, Center = true, Outline = true, Color = L.dimCol, Transparency = 0.8 })
+    r.barBg = mk("Square", { Filled = true, Color = Color3.fromRGB(38, 38, 46), Transparency = 0.85 })
+    r.bar = mk("Square", { Filled = true, Color = L.fillCol, Transparency = 1 })
+    r.pct = mk("Text", { Text = "0%", Size = 12, Center = false, Outline = true, Color = L.fillCol, Transparency = 1 })
+    r.status = mk("Text", { Text = "starting", Size = 13, Center = false, Outline = true, Color = L.textCol, Transparency = 1 })
+    r.rows = {}
+    if FONT then
+        for _, t in ipairs({ r.title, r.sub, r.pct, r.status }) do
+            if t then pcall(function() t.Font = FONT end) end
+        end
+    end
+    for i = 1, #L.items do
+        local row = mk("Text", { Text = "  -  " .. L.items[i], Size = 12, Center = false, Outline = true, Color = L.dimCol, Transparency = 0.45 })
+        if row and FONT then pcall(function() row.Font = FONT end) end
+        r.rows[i] = row
+    end
+    for i = 1, #d do pcall(function() d[i].Visible = true end) end
+    L.d, L.r, L.active = d, r, true
+    L.place()
+end
+
+RT.load.status = function(text)
+    local L = RT.load
+    if not L.d or not L.r or not L.r.status then return end
+    pcall(function() L.r.status.Text = text end)
+end
+
+RT.load.sub = function(p)
+    local L = RT.load
+    if not L.d then return end
+    if p < 0 then p = 0 elseif p > 1 then p = 1 end
+    L.frac((((L.i or 1) - 1) + p) / #L.items)
+end
+
+RT.load.stage = function(i, text)
+    local L = RT.load
+    if not L.d then return end
+    L.i = i
+    local r = L.r
+    for j = 1, #L.items do
+        local row = r.rows[j]
+        if row then
+            local txt, col, tr
+            if j < i then
+                txt, col, tr = "  +  " .. L.items[j], L.okCol, 0.9
+            elseif j == i then
+                txt, col, tr = "  >  " .. L.items[j] .. "...", L.fillCol, 1
+            else
+                txt, col, tr = "  -  " .. L.items[j], L.dimCol, 0.45
+            end
+            pcall(function() row.Text, row.Color, row.Transparency = txt, col, tr end)
+        end
+    end
+    if text then
+        L.status(text)
+    elseif r.status then
+        pcall(function() r.status.Text = L.items[i] .. "..." end)
+    end
+    L.frac((i - 1) / #L.items)
+end
+
+RT.load.finish = function()
+    local L = RT.load
+    if not L.d then return end
+    L.frac(1)
+    for j = 1, #L.items do
+        local row = L.r and L.r.rows[j]
+        if row then
+            pcall(function() row.Text = "  +  " .. L.items[j]; row.Color = L.okCol; row.Transparency = 0.9 end)
+        end
+    end
+    L.status("loaded")
+    task.spawn(function()
+        task.wait(1.2)
+        RT.load.destroy()
+    end)
+end
+
 local CORNER = {
     {-1,-1,-1},{ 1,-1,-1},{-1, 1,-1},{ 1, 1,-1},
     {-1,-1, 1},{ 1,-1, 1},{-1, 1, 1},{ 1, 1, 1},
@@ -2351,6 +2516,7 @@ local function refreshWorld()
         genList = kept
         if not kept[1] then genDiscoverAt = os.clock() + 6 end
     end
+    if RT.load.active then RT.load.sub(0.45) end
 
     if not CFG.win then
         winList = {}
@@ -2386,6 +2552,7 @@ local function refreshWorld()
             end
         end
     end
+    if RT.load.active then RT.load.sub(1) end
     worldMs = worldMs * 0.8 + (os.clock() - started) * 1000 * 0.2
 end
 
@@ -2400,6 +2567,7 @@ local function refreshPallets()
         ensureSlots(palPool, math.min(#list, CFG.palPool), CFG.palThick, CFG.palText)
         palList = list
     end
+    if RT.load.active then RT.load.sub(1) end
     palScanMs = palScanMs * 0.8 + (os.clock() - started) * 1000 * 0.2
 end
 
@@ -2877,6 +3045,7 @@ function API.unload()
     if kbwDestroy then pcall(kbwDestroy) end
     if API.matchaCleanup then pcall(API.matchaCleanup) end
     if HUD.destroy then pcall(HUD.destroy) end
+    if RT.load and RT.load.destroy then pcall(RT.load.destroy) end
     scReleaseInput()
     if UI and UI.Unload then pcall(function() UI:Unload() end) end
     UI, uiWindow = nil, nil
@@ -9136,42 +9305,62 @@ local function buildMatchaUI()
     return true
 end
 
--- boot
+-- boot. everything below runs in a thread that yields between the items: the
+-- exec call blocks the game for as long as it runs, so the loading screen is
+-- built first and the chunk returns straight after, which is the only way it is
+-- ever seen. the steps themselves are unchanged.
 RT.bootAt = os.clock()
-local okM, resM = pcall(buildMatchaUI)
-if not okM or resM == false then
-    if not okM and type(warn) == "function" then
-        warn("[swangy] matcha ui failed: " .. tostring(resM))
-    end
-    okM, resM = pcall(buildUI)
-    if not okM and type(warn) == "function" then
-        warn("[swangy] ui failed: " .. tostring(resM))
-    end
-end
-API.ui = UI
-RT.safe()
-pcall(print, string.format("[swangy] ui up: %s in %.1fs (the exec call returns after this)",
-    tostring(type(UI) == "table" and "ok" or "none"),
-    os.clock() - (RT.bootAt or os.clock())))
+RT.load.setup()
+RT.load.stage(1)
+_G.__SWANGY = API
 
--- the first scan used to run inside the exec call itself, which on a full map is
--- the one place the loader could block long enough to look like a crash
 task.spawn(function()
+    task.wait(0.05)
+    local okM, resM = pcall(buildMatchaUI)
+    if not okM or resM == false then
+        if not okM and type(warn) == "function" then
+            warn("[swangy] matcha ui failed: " .. tostring(resM))
+        end
+        okM, resM = pcall(buildUI)
+        if not okM and type(warn) == "function" then
+            warn("[swangy] ui failed: " .. tostring(resM))
+        end
+    end
+    API.ui = UI
+    RT.safe()
+    pcall(print, string.format("[swangy] ui up: %s in %.1fs",
+        tostring(type(UI) == "table" and "ok" or "none"),
+        os.clock() - (RT.bootAt or os.clock())))
+    RT.load.stage(2)
+    task.wait(0.05)
+    if not running then RT.load.destroy() return end
+
+    -- the map streams in, and reading it before that is the one thing that
+    -- hard-crashes this VM, so the bar waits where it is
+    RT.load.stage(3, "waiting for the map")
+    while running and not RT.isLoaded() do task.wait(0.2) end
+    if not running then RT.load.destroy() return end
     task.wait(0.8)
-    while running and not RT.isLoaded() do task.wait(0.5) end
-    if not running then return end
+    if not running then RT.load.destroy() return end
+
+    RT.load.status("generators + windows")
     local scanAt = os.clock()
     local okw, errw = pcall(refreshWorld)
+    RT.load.stage(4)
+    task.wait(0.05)
+    if not running then RT.load.destroy() return end
     local okp, errp = pcall(refreshPallets)
     pcall(print, string.format("[swangy] first scan: gen=%d win=%d pal=%d trap=%d drawings=%d in %.1fs%s%s",
         #genList, #winList, #palList, #trapList, RT.draw, os.clock() - scanAt,
         okw and "" or (" world=" .. tostring(errw)),
         okp and "" or (" pal=" .. tostring(errp))))
-end)
-if type(notify) == "function" then
-    notify("esp + skillcheck + veil aim", "Swangy", 4)
-end
 
-_G.__SWANGY = API
+    RT.load.stage(5)
+    task.wait(0.4)
+    RT.load.finish()
+    if type(notify) == "function" then
+        notify("esp + skillcheck + veil aim", "Swangy", 4)
+    end
+end)
 
 return API
